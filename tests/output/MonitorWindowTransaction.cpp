@@ -276,6 +276,121 @@ SP<Render::IFramebuffer> CTransactionTestRenderer::createFB(const std::string&) 
     return makeShared<CTransactionTestFramebuffer>(true);
 }
 
+// Minimal backend driving the _NET_WM_SYNC_REQUEST transaction hold. The hold in
+// CMonitorWindowTransaction::ready() is type-agnostic (it only consults waitingForSync()),
+// so this mirrors the fixture's Wayland windows but exposes a settable sync hold.
+class CSyncHoldTestBackend final : public IWindowBackend {
+  public:
+    CSyncHoldTestBackend(SP<CWLSurfaceResource> surface, const CBox& box) : m_surface(surface), m_geometry(box) {
+        ;
+    }
+
+    bool                   m_waitingForSync = false;
+
+    bool                   valid() const override {
+        return true;
+    }
+    bool                   isMapped() const override {
+        return true;
+    }
+    eBackendType           type() const override {
+        return eBackendType::WINDOW_BACKEND_WAYLAND;
+    }
+    bool                   waitingForSync() const override {
+        return m_waitingForSync;
+    }
+    pid_t                  pid() const override {
+        return -1;
+    }
+    SP<CWLSurfaceResource> surface() const override {
+        return m_surface.lock();
+    }
+    PHLWINDOW              parent() const override {
+        return nullptr;
+    }
+    SBackendClientID       clientID() const override {
+        return {.type = eBackendType::WINDOW_BACKEND_WAYLAND, .id = 0};
+    }
+    bool                   initialCommit() const override {
+        return false;
+    }
+    SClientGeometry        geometry() const override {
+        return {.box = m_geometry, .positionAuthoritative = false};
+    }
+    SGeometryHints         geometryHints(eBackendState) const override {
+        return {};
+    }
+    SBackendMetadata       metadata() const override {
+        return {};
+    }
+    SBackendTraits         traits() const override {
+        return {};
+    }
+    double                 surfaceScale() const override {
+        return 1.0;
+    }
+    Vector2D               reportedSize() const override {
+        return m_geometry.size();
+    }
+    CBox                   clientToLogical(const CBox& box, PHLMONITOR) const override {
+        return box;
+    }
+    CBox                   logicalToClient(const CBox& box, PHLMONITOR) const override {
+        return box;
+    }
+    Vector2D               surfaceLocalToBuffer(const Vector2D& local) const override {
+        return local;
+    }
+    Vector2D               bufferToSurfaceLocal(const Vector2D& buffer) const override {
+        return buffer;
+    }
+    Vector2D               globalToBuffer(const Vector2D& pos, const Vector2D& origin) const override {
+        return pos - origin;
+    }
+    void                   configure(const CBox&, PHLMONITOR, bool) override {
+        ;
+    }
+    void                   acknowledgeConfigure(const CBox&) override {
+        ;
+    }
+    void                   setActive(bool) override {
+        ;
+    }
+    void                   setFullscreen(bool) override {
+        ;
+    }
+    void                   setMaximized(bool) override {
+        ;
+    }
+    void                   setResizing(bool) override {
+        ;
+    }
+    bool                   setSuspended(bool) override {
+        return false;
+    }
+    void                   setMinimized(bool) override {
+        ;
+    }
+    void                   restackToTop() override {
+        ;
+    }
+    void                   close() override {
+        ;
+    }
+    void                   ping() override {
+        ;
+    }
+
+  private:
+    void                   attach(PHLWINDOWREF window) override {
+        m_window = window;
+    }
+
+    WP<CWLSurfaceResource> m_surface;
+    PHLWINDOWREF           m_window;
+    CBox                   m_geometry;
+};
+
 class CMonitorWindowTransactionTest : public ::testing::Test {
   protected:
     void SetUp() override {
@@ -395,6 +510,28 @@ class CMonitorWindowTransactionTest : public ::testing::Test {
         window->m_backendListeners.commit.reset();
         m_clients.push_back({surface, xdg});
         return window;
+    }
+
+    PHLWINDOW makeSyncWindow(const CBox& box = {10, 20, 100, 80}) {
+        auto surface            = makeShared<CWLSurfaceResource>(makeShared<CWlSurface>(m_client, 6, m_nextID++));
+        surface->m_self         = surface;
+        auto xdg                = makeShared<CXDGSurfaceResource>(makeShared<CXdgSurface>(m_client, 6, m_nextID++), nullptr, surface);
+        xdg->m_self             = xdg;
+        xdg->m_current.geometry = {{}, box.size()};
+        auto window             = CWindow::create(makeUnique<CSyncHoldTestBackend>(surface, box));
+        Desktop::windowState()->removeSafe(window);
+        window->m_monitor = m_monitor;
+        window->positionAnimation()->setValueAndWarp(box.pos());
+        window->sizeAnimation()->setValueAndWarp(box.size());
+        window->m_isMapped = true;
+        window->m_backendListeners.geometryChanged.reset();
+        window->m_backendListeners.commit.reset();
+        m_clients.push_back({surface, xdg});
+        return window;
+    }
+
+    CSyncHoldTestBackend& syncBackend(PHLWINDOW window) {
+        return static_cast<CSyncHoldTestBackend&>(window->backend());
     }
 
     PHLWORKSPACE makeWorkspace(bool visible, PHLMONITOR monitor = nullptr) {
@@ -2654,4 +2791,71 @@ TEST_F(CMonitorWindowTransactionTest, ClosingTheLastReplacementRetiresSnapshotsW
     EXPECT_TRUE(fadeout->done());
     EXPECT_FALSE(timer(m_monitor)->armed());
     EXPECT_FALSE(transaction.hasPendingPresentation());
+}
+
+// _NET_WM_SYNC_REQUEST: a window waiting for its sync ack holds the batch even past the
+// transaction fail-open deadline, and releases once the hold clears (onSyncFinished).
+TEST_F(CMonitorWindowTransactionTest, SyncHoldBlocksBatchEvenAfterTimeout) {
+    auto       window                    = makeSyncWindow();
+    syncBackend(window).m_waitingForSync = true;
+    const auto before                    = appliedGoal(window);
+    const CBox goal{10, 20, 200, 160};
+    auto&      transaction = *m_monitor->m_windowTransaction;
+    transaction.queue(window, goal);
+    expire(m_monitor);
+    transaction.onPreRender();
+    transaction.onPostRender();
+    EXPECT_EQ(appliedGoal(window), before);
+    EXPECT_TRUE(pending(window));
+
+    syncBackend(window).m_waitingForSync = false;
+    transaction.onSyncFinished(window);
+    EXPECT_EQ(appliedGoal(window), goal);
+    EXPECT_FALSE(pending(window));
+}
+
+TEST_F(CMonitorWindowTransactionTest, SyncHoldOverridesDragBypass) {
+    auto       window                    = makeSyncWindow();
+    syncBackend(window).m_waitingForSync = true;
+    const auto before                    = appliedGoal(window);
+    const CBox goal{10, 20, 200, 160};
+    auto&      transaction = *m_monitor->m_windowTransaction;
+    transaction.queue(window, goal);
+    stageDrag(window->layoutTarget());
+    transaction.onPreRender();
+    EXPECT_EQ(appliedGoal(window), before);
+    transaction.onPostRender();
+    EXPECT_EQ(appliedGoal(window), before);
+    EXPECT_TRUE(pending(window));
+
+    syncBackend(window).m_waitingForSync = false;
+    transaction.onSyncFinished(window);
+    EXPECT_EQ(appliedGoal(window), goal);
+    EXPECT_FALSE(pending(window));
+}
+
+TEST_F(CMonitorWindowTransactionTest, ZeroTimeoutDisablesSyncHold) {
+    *CConfigValue<Config::INTEGER>("misc:transaction_timeout").ptr() = 0;
+    auto       window                                              = makeSyncWindow();
+    syncBackend(window).m_waitingForSync                           = true;
+    const CBox goal{10, 20, 200, 160};
+    auto&      transaction = *m_monitor->m_windowTransaction;
+    transaction.queue(window, goal);
+    transaction.onPreRender();
+    EXPECT_EQ(appliedGoal(window), goal);
+    EXPECT_FALSE(pending(window));
+}
+
+TEST_F(CMonitorWindowTransactionTest, NonSyncWindowResizeStillAppliesAtDeadline) {
+    auto       window = makeWindow();
+    const auto before = appliedGoal(window);
+    const CBox goal{10, 20, 200, 160};
+    auto&      transaction = *m_monitor->m_windowTransaction;
+    transaction.queue(window, goal);
+    transaction.onPreRender();
+    EXPECT_EQ(appliedGoal(window), before);
+    transaction.onPostRender();
+    expire(m_monitor);
+    EXPECT_EQ(appliedGoal(window), goal);
+    EXPECT_FALSE(pending(window));
 }

@@ -221,7 +221,20 @@ bool CMonitorWindowTransaction::onlyMoves() const {
 
 bool CMonitorWindowTransaction::ready() const {
     static const auto PTIMEOUT = CConfigValue<Config::INTEGER>("misc:transaction_timeout");
-    if (m_timedOut || *PTIMEOUT == 0)
+    if (*PTIMEOUT == 0)
+        return true;
+
+    // X11 windows waiting for a _NET_WM_SYNC_REQUEST ack hold the batch. This must
+    // override both the timed-out fail-open and the drag shortcut below.
+    for (const auto& window : m_pending) {
+        if (!window || !window->mapped())
+            continue;
+
+        if (window->backend().waitingForSync())
+            return false;
+    }
+
+    if (m_timedOut)
         return true;
 
     // Do not make transactions when we are dragging, this is terrible UX.
@@ -267,6 +280,11 @@ void CMonitorWindowTransaction::onWindowCommit(PHLWINDOW window) {
     window->m_pendingGeometry->ready = SURFACE->m_current.buffer && matchesPendingResize(window);
     if (window->m_pendingGeometry->ready)
         requestApply();
+}
+
+void CMonitorWindowTransaction::onSyncFinished(PHLWINDOW) {
+    // an X11 window dropped its _NET_WM_SYNC_REQUEST hold: re-evaluate the batch now
+    requestApply();
 }
 
 bool CMonitorWindowTransaction::matchesPendingResize(PHLWINDOW window) const {

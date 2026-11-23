@@ -8,11 +8,21 @@
 
 class CWLSurfaceResource;
 class CXWaylandSurfaceResource;
+class CEventLoopTimer;
 
 #ifdef NO_XWAYLAND
-using xcb_pixmap_t = uint32_t;
-using xcb_window_t = uint32_t;
-using xcb_atom_t   = uint32_t;
+#ifndef XCB_NONE
+#define XCB_NONE 0L
+#endif
+using xcb_pixmap_t       = uint32_t;
+using xcb_window_t       = uint32_t;
+using xcb_atom_t         = uint32_t;
+using xcb_sync_counter_t = uint32_t;
+using xcb_sync_alarm_t   = uint32_t;
+struct xcb_sync_int64_t {
+    int32_t  hi;
+    uint32_t lo;
+};
 struct xcb_icccm_wm_hints_t {
     int32_t      flags;
     uint32_t     input;
@@ -37,6 +47,7 @@ struct xcb_size_hints_t {
 };
 #else
 #include <xcb/xcb_icccm.h>
+#include <xcb/sync.h>
 #endif
 
 class CXWaylandSurface {
@@ -57,6 +68,7 @@ class CXWaylandSurface {
         CSignalT<>     map;
         CSignalT<>     unmap;
         CSignalT<>     commit;
+        CSignalT<>     syncFinished;
         CSignalT<>     pong;
 
         CSignalT<>     activate;
@@ -98,6 +110,7 @@ class CXWaylandSurface {
     bool                              m_transient = false;
 
     bool                              wantsFocus();
+    bool                              waitingForSync() const;
     void                              configure(const CBox& box);
     void                              activate(bool activate);
     void                              setFullscreen(bool fs);
@@ -105,6 +118,8 @@ class CXWaylandSurface {
     void                              restackToTop();
     void                              close();
     void                              ping();
+
+    ~CXWaylandSurface();
 
   private:
     CXWaylandSurface(uint32_t xID, CBox geometry, bool OR);
@@ -115,6 +130,28 @@ class CXWaylandSurface {
     void considerMap();
     void setWithdrawn(bool withdrawn);
     void recheckSupportedProps();
+
+    // _NET_WM_SYNC_REQUEST state machine (see KWin X11Window::m_syncRequest)
+    struct SSyncRequest {
+        xcb_sync_counter_t  counter = XCB_NONE;
+        xcb_sync_alarm_t    alarm   = XCB_NONE;
+        xcb_sync_int64_t    value   = {0, 0};
+        bool                enabled = false;
+        bool                pending = false;
+        bool                acked   = false;
+        SP<CEventLoopTimer> timeout;
+    };
+
+    void         updateSyncSupport();
+    void         sendSyncRequest();
+    void         ackSync();
+    void         ackSyncTimeout();
+    void         finishSync();
+    void         destroySync();
+    void         setAllowCommits(bool allow);
+
+    SSyncRequest m_sync;
+    bool         m_allowCommitsSupported = true;
 
     struct {
         CHyprSignalListener destroyResource;

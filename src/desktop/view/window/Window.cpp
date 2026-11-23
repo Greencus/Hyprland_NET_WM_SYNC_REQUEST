@@ -141,6 +141,10 @@ void CWindow::attachBackendListeners() {
     m_backendListeners.map               = m_backend->m_events.map.listen([this] { mapWindow(); });
     m_backendListeners.unmap             = m_backend->m_events.unmap.listen([this] { unmapWindow(); });
     m_backendListeners.commit            = m_backend->m_events.commit.listen([this](bool initial) { commitWindow(initial); });
+    m_backendListeners.syncFinished      = m_backend->m_events.syncFinished.listen([this] {
+        if (const auto MONITOR = m_monitor.lock(); MONITOR && MONITOR->m_windowTransaction)
+            MONITOR->m_windowTransaction->onSyncFinished(m_self.lock());
+    });
     m_backendListeners.destroy           = m_backend->m_events.destroy.listen([this] { destroyWindow(); });
     m_backendListeners.surfaceChanged    = m_backend->m_events.surfaceChanged.listen([this](const auto& surface) { onSurfaceChanged(surface); });
     m_backendListeners.metadataChanged   = m_backend->m_events.metadataChanged.listen([this](const auto& metadata) { onUpdateMeta(metadata); });

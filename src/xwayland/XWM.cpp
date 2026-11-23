@@ -360,8 +360,13 @@ void CXWM::readProp(SP<CXWaylandSurface> XSURF, uint32_t atom, xcb_get_property_
         handleTransientFor();
     else if (atom == HYPRATOMS["WM_NORMAL_HINTS"])
         handleSizeHints();
-    else if (atom == HYPRATOMS["WM_PROTOCOLS"])
+    else if (atom == HYPRATOMS["WM_PROTOCOLS"]) {
         handleWMProtocols();
+        XSURF->updateSyncSupport();
+    } else if (atom == HYPRATOMS["_NET_WM_SYNC_REQUEST_COUNTER"])
+        XSURF->updateSyncSupport();
+    else if (atom == HYPRATOMS["_XWAYLAND_ALLOW_COMMITS"])
+        return; // our own _XWAYLAND_ALLOW_COMMITS writes, nothing to read
     else {
         LOG(Log::TRACE, "[xwm] Unhandled prop {} -> {}", atom, propName);
         return;
@@ -542,6 +547,20 @@ void CXWM::handleFocusOut(xcb_focus_out_event_t* e) {
         XSURF == m_focusedSurface ? "focused" : "unfocused", XSURF->m_state.title);
 
     // do something?
+}
+
+void CXWM::handleSyncAlarm(xcb_sync_alarm_notify_event_t* e) {
+    for (auto const& s : m_surfaces) {
+        if (!s || s->m_sync.alarm == XCB_NONE || s->m_sync.alarm != e->alarm)
+            continue;
+
+        // only accept the serial we are currently waiting for
+        if (s->m_sync.value.hi != e->counter_value.hi || s->m_sync.value.lo != e->counter_value.lo)
+            continue;
+
+        s->ackSync();
+        return;
+    }
 }
 
 void CXWM::sendWMMessage(SP<CXWaylandSurface> surf, xcb_client_message_data_t* data, uint32_t mask) {
@@ -895,6 +914,12 @@ int CXWM::onEvent(int fd, uint32_t mask) {
         if (handleSelectionEvent(event.get()))
             continue;
 
+        // XSync alarm notifies carry a dynamic event base, they must be matched before the core switch.
+        if (m_sync && m_sync->present && m_syncEventBase && (event->response_type & XCB_EVENT_RESPONSE_TYPE_MASK) == m_syncEventBase + XCB_SYNC_ALARM_NOTIFY) {
+            handleSyncAlarm(rc<xcb_sync_alarm_notify_event_t*>(event.get()));
+            continue;
+        }
+
         switch (event->response_type & XCB_EVENT_RESPONSE_TYPE_MASK) {
             case XCB_CREATE_NOTIFY: handleCreate(rc<xcb_create_notify_event_t*>(event.get())); break;
             case XCB_DESTROY_NOTIFY: handleDestroy(rc<xcb_destroy_notify_event_t*>(event.get())); break;
@@ -924,6 +949,7 @@ void CXWM::gatherResources() {
     xcb_prefetch_extension_data(getConnection(), &xcb_xfixes_id);
     xcb_prefetch_extension_data(getConnection(), &xcb_composite_id);
     xcb_prefetch_extension_data(getConnection(), &xcb_res_id);
+    xcb_prefetch_extension_data(getConnection(), &xcb_sync_id);
 
     for (auto& ATOM : HYPRATOMS) {
         xcb_intern_atom_cookie_t             cookie = xcb_intern_atom(getConnection(), 0, ATOM.first.length(), ATOM.first.c_str());
@@ -948,6 +974,15 @@ void CXWM::gatherResources() {
     if (xfixes_reply) {
         LOG(Log::DEBUG, "xfixes version: {}.{}", xfixes_reply->major_version, xfixes_reply->minor_version);
         m_xfixesMajor = xfixes_reply->major_version;
+    }
+
+    // XSync must be queried before the xres early-return below, res is optional for it.
+    m_sync = xcb_get_extension_data(getConnection(), &xcb_sync_id);
+    if (!m_sync || !m_sync->present)
+        LOG(Log::WARN, "XSync not available");
+    else {
+        m_syncEventBase = m_sync->first_event;
+        LOG(Log::DEBUG, "xsync event base: {}", m_syncEventBase);
     }
 
     const auto* xresReply1 = xcb_get_extension_data(getConnection(), &xcb_res_id);
@@ -1190,10 +1225,17 @@ void CXWM::onNewResource(SP<CXWaylandSurfaceResource> resource) {
 }
 
 void CXWM::readWindowData(SP<CXWaylandSurface> surf) {
-    const std::array<xcb_atom_t, 9> interestingProps = {
-        XCB_ATOM_WM_CLASS,          XCB_ATOM_WM_NAME,          XCB_ATOM_WM_TRANSIENT_FOR,        HYPRATOMS["WM_HINTS"],
-        HYPRATOMS["_NET_WM_STATE"], HYPRATOMS["_NET_WM_NAME"], HYPRATOMS["_NET_WM_WINDOW_TYPE"], HYPRATOMS["WM_NORMAL_HINTS"],
+    const std::array<xcb_atom_t, 10> interestingProps = {
+        XCB_ATOM_WM_CLASS,
+        XCB_ATOM_WM_NAME,
+        XCB_ATOM_WM_TRANSIENT_FOR,
+        HYPRATOMS["WM_HINTS"],
+        HYPRATOMS["_NET_WM_STATE"],
+        HYPRATOMS["_NET_WM_NAME"],
+        HYPRATOMS["_NET_WM_WINDOW_TYPE"],
+        HYPRATOMS["WM_NORMAL_HINTS"],
         HYPRATOMS["WM_PROTOCOLS"],
+        HYPRATOMS["_NET_WM_SYNC_REQUEST_COUNTER"],
     };
 
     for (size_t i = 0; i < interestingProps.size(); i++) {

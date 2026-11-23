@@ -170,6 +170,7 @@ CX11Backend::CX11Backend(SP<CXWaylandSurface> surface) : m_xwaylandSurface(surfa
         updateTraits(true);
         m_events.commit.emit(false);
     });
+    m_listeners.syncFinished   = surface->m_events.syncFinished.listen([this] { m_events.syncFinished.emit(); });
     m_listeners.destroy        = surface->m_events.destroy.listen([this] {
         updateGeometry(false);
         updateMetadata(false);
@@ -262,6 +263,11 @@ SBackendClientID CX11Backend::clientID() const {
 
 bool CX11Backend::initialCommit() const {
     return false;
+}
+
+bool CX11Backend::waitingForSync() const {
+    const auto SURFACE = m_xwaylandSurface.lock();
+    return SURFACE && SURFACE->waitingForSync();
 }
 
 SClientGeometry CX11Backend::geometry() const {

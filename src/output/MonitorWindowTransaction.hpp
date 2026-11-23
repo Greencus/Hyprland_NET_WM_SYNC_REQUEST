@@ -37,6 +37,7 @@ namespace Monitor {
         void onPreRender();
         void onPostRender();
         void onWindowCommit(PHLWINDOW window);
+        void onSyncFinished(PHLWINDOW window);
 
       private:
         bool                                                 onlyMoves() const;

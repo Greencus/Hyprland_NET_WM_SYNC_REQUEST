@@ -350,6 +350,7 @@ namespace Desktop::View {
             CHyprSignalListener unmap;
             CHyprSignalListener preUnmap;
             CHyprSignalListener commit;
+            CHyprSignalListener syncFinished;
             CHyprSignalListener destroy;
             CHyprSignalListener surfaceChanged;
             CHyprSignalListener metadataChanged;

@@ -103,6 +103,7 @@ namespace Desktop::View {
         virtual bool                   isMapped() const = 0;
         virtual eBackendType           type() const     = 0;
         bool                           isX11() const;
+        virtual bool                   waitingForSync() const;
         virtual pid_t                  pid() const      = 0;
         virtual SP<CWLSurfaceResource> surface() const  = 0;
         virtual PHLWINDOW              parent() const   = 0;
@@ -138,6 +139,7 @@ namespace Desktop::View {
             CSignalT<>                       map;
             CSignalT<>                       unmap;
             CSignalT<bool>                   commit;
+            CSignalT<>                       syncFinished;
             CSignalT<>                       destroy;
             CSignalT<SP<CWLSurfaceResource>> surfaceChanged;
             CSignalT<SBackendMetadata>       metadataChanged;

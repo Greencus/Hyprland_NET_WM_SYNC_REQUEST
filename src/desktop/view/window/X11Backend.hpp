@@ -21,6 +21,7 @@ namespace Desktop::View {
         SBackendClientID       clientID() const override;
 
         bool                   initialCommit() const override;
+        bool                   waitingForSync() const override;
         SClientGeometry        geometry() const override;
         SGeometryHints         geometryHints(eBackendState state) const override;
         SBackendMetadata       metadata() const override;
@@ -75,6 +76,7 @@ namespace Desktop::View {
             CHyprSignalListener map;
             CHyprSignalListener unmap;
             CHyprSignalListener commit;
+            CHyprSignalListener syncFinished;
             CHyprSignalListener destroy;
             CHyprSignalListener resourceChange;
             CHyprSignalListener state;

@@ -3,10 +3,30 @@
 #include "../protocols/XWaylandShell.hpp"
 #include "../protocols/core/Compositor.hpp"
 #include "../helpers/time/Time.hpp"
+#include "../helpers/env/Env.hpp"
+#include "../managers/eventLoop/EventLoopManager.hpp"
+
+#include <algorithm>
+#include <cstdlib>
+#include <memory>
+#include <ranges>
 
 #ifndef NO_XWAYLAND
 
+struct SFreeDeleter {
+    void operator()(void* ptr) const {
+        std::free(ptr); // NOLINT(cppcoreguidelines-no-malloc)
+    }
+};
+
+template <typename T>
+using XCBReplyPtr = std::unique_ptr<T, SFreeDeleter>;
+
+static constexpr std::chrono::milliseconds SYNC_REQUEST_TIMEOUT = std::chrono::milliseconds(1000);
+
 CXWaylandSurface::CXWaylandSurface(uint32_t xID_, CBox geometry_, bool OR) : m_xID(xID_), m_geometry(geometry_), m_overrideRedirect(OR) {
+    m_allowCommitsSupported = !Env::envEnabled("HYPRLAND_NO_XWAYLAND_ALLOW_COMMITS");
+
     xcb_res_query_client_ids_cookie_t client_id_cookie = {0};
     if (g_pXWayland->m_wm->m_xres) {
         xcb_res_client_id_spec_t spec = {.client = m_xID, .mask = XCB_RES_CLIENT_ID_MASK_LOCAL_CLIENT_PID};
@@ -43,6 +63,10 @@ CXWaylandSurface::CXWaylandSurface(uint32_t xID_, CBox geometry_, bool OR) : m_x
     recheckSupportedProps();
 
     m_events.resourceChange.listenStatic([this] { ensureListeners(); });
+}
+
+CXWaylandSurface::~CXWaylandSurface() {
+    destroySync();
 }
 
 void CXWaylandSurface::recheckSupportedProps() {
@@ -87,6 +111,8 @@ void CXWaylandSurface::ensureListeners() {
             if (m_mapped)
                 unmap();
 
+            destroySync();
+
             m_surface.reset();
             m_listeners.destroySurface.reset();
             m_listeners.commitSurface.reset();
@@ -104,6 +130,10 @@ void CXWaylandSurface::ensureListeners() {
                 return;
             }
 
+            // the client acked and produced the new buffer: release the sync hold
+            if (m_sync.acked && m_surface->m_current.updated.bits.buffer)
+                finishSync();
+
             m_events.commit.emit();
         });
     }
@@ -111,6 +141,7 @@ void CXWaylandSurface::ensureListeners() {
     if (m_resource) {
         m_listeners.destroyResource = m_resource->events.destroy.listen([this] {
             unmap();
+            destroySync();
             m_surface.reset();
             m_events.resourceChange.emit();
         });
@@ -152,6 +183,9 @@ void CXWaylandSurface::unmap() {
     LOG(Log::DEBUG, "XWayland surface {:x} unmapping", rc<uintptr_t>(this));
 
     g_pXWayland->m_wm->updateClientList();
+
+    // windows may remap; drop the sync state so detection can set it up again
+    destroySync();
 }
 
 void CXWaylandSurface::considerMap() {
@@ -201,6 +235,12 @@ void CXWaylandSurface::configure(const CBox& box) {
     if (m_surface)
         m_surface->m_pending.updated.bits.xwayland = true;
 
+    // gate the resize on the client's repaint: _XWAYLAND_ALLOW_COMMITS=0 and the sync
+    // request must both go out before the ConfigureNotify below. Pure moves never sync.
+    const bool SIZECHANGED = box.width != oldSize.x || box.height != oldSize.y;
+    if (m_mapped && m_surface && SIZECHANGED && m_sync.enabled && !m_sync.pending)
+        sendSyncRequest();
+
     uint32_t mask     = XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT | XCB_CONFIG_WINDOW_BORDER_WIDTH;
     uint32_t values[] = {box.x, box.y, box.width, box.height, 0};
     xcb_configure_window(g_pXWayland->m_wm->getConnection(), m_xID, mask, values);
@@ -223,6 +263,185 @@ void CXWaylandSurface::configure(const CBox& box) {
 
     g_pXWayland->m_wm->updateClientList();
 
+    xcb_flush(g_pXWayland->m_wm->getConnection());
+}
+
+bool CXWaylandSurface::waitingForSync() const {
+    return m_sync.enabled && (m_sync.pending || m_sync.acked);
+}
+
+void CXWaylandSurface::updateSyncSupport() {
+    if (m_overrideRedirect)
+        return;
+
+    const auto         CONNECTION = g_pXWayland->m_wm->getConnection();
+    const bool         SYNCEXT    = g_pXWayland->m_wm->m_sync && g_pXWayland->m_wm->m_sync->present;
+
+    xcb_sync_counter_t counter = XCB_NONE;
+    if (SYNCEXT) {
+        const auto                            COOKIE = xcb_get_property(CONNECTION, 0, m_xID, HYPRATOMS["_NET_WM_SYNC_REQUEST_COUNTER"], XCB_ATOM_CARDINAL, 0, 1);
+        XCBReplyPtr<xcb_get_property_reply_t> REPLY(xcb_get_property_reply(CONNECTION, COOKIE, nullptr));
+        if (REPLY && REPLY->type == XCB_ATOM_CARDINAL && REPLY->format == 32 && xcb_get_property_value_length(REPLY.get()) >= sc<int>(sizeof(xcb_sync_counter_t)))
+            counter = *sc<const xcb_sync_counter_t*>(xcb_get_property_value(REPLY.get()));
+    }
+
+    // m_protocols is authoritative: m_supportedProps races with the WM_PROTOCOLS read
+    const bool PROTOCOL = std::ranges::find(m_protocols, HYPRATOMS["_NET_WM_SYNC_REQUEST"]) != m_protocols.end();
+    if (!SYNCEXT || !PROTOCOL || counter == XCB_NONE) {
+        if (m_sync.enabled || m_sync.pending || m_sync.acked || m_sync.alarm != XCB_NONE)
+            destroySync();
+        return;
+    }
+
+    if (m_sync.enabled && m_sync.counter == counter)
+        return; // already set up for this counter
+
+    // (re)initialize from scratch so the alarm test value matches a fresh serial sequence
+    if (m_sync.enabled || m_sync.pending || m_sync.acked || m_sync.alarm != XCB_NONE || m_sync.timeout)
+        destroySync();
+
+    m_sync.counter = counter;
+    m_sync.enabled = true;
+    m_sync.value   = {0, 0};
+    xcb_sync_set_counter(CONNECTION, counter, m_sync.value);
+
+    if (m_sync.alarm == XCB_NONE) {
+        const uint32_t MASK     = XCB_SYNC_CA_COUNTER | XCB_SYNC_CA_VALUE_TYPE | XCB_SYNC_CA_TEST_TYPE | XCB_SYNC_CA_EVENTS;
+        const uint32_t VALUES[] = {
+            m_sync.counter,
+            XCB_SYNC_VALUETYPE_RELATIVE,
+            XCB_SYNC_TESTTYPE_POSITIVE_TRANSITION,
+            1,
+        };
+        m_sync.alarm                            = xcb_generate_id(CONNECTION);
+        const auto                       COOKIE = xcb_sync_create_alarm_checked(CONNECTION, m_sync.alarm, MASK, VALUES);
+        XCBReplyPtr<xcb_generic_error_t> ERROR(xcb_request_check(CONNECTION, COOKIE));
+        if (ERROR) {
+            LOG(Log::ERR, "[xwm] Failed to create the XSync alarm for window {}", m_xID);
+            m_sync.alarm   = XCB_NONE;
+            m_sync.enabled = false;
+            return;
+        }
+
+        xcb_sync_change_alarm_value_list_t VALUE = {};
+        VALUE.value.hi                           = 0;
+        VALUE.value.lo                           = 1;
+        VALUE.delta.hi                           = 0;
+        VALUE.delta.lo                           = 1;
+        xcb_sync_change_alarm_aux(CONNECTION, m_sync.alarm, XCB_SYNC_CA_DELTA | XCB_SYNC_CA_VALUE, &VALUE);
+    }
+}
+
+void CXWaylandSurface::sendSyncRequest() {
+    if (!m_sync.enabled || m_sync.pending)
+        return; // do NOT, NEVER send a sync request when there's one on the stack
+
+    // a new request supersedes an ack whose buffer commit has not landed yet
+    m_sync.acked = false;
+
+    if (!m_sync.timeout) {
+        const auto SELF = m_self;
+        m_sync.timeout  = makeShared<CEventLoopTimer>(
+            std::nullopt,
+            [SELF](SP<CEventLoopTimer>, void*) {
+                if (const auto SURFACE = SELF.lock())
+                    SURFACE->ackSyncTimeout();
+            },
+            nullptr);
+        g_pEventLoopManager->addTimer(m_sync.timeout);
+    }
+    m_sync.timeout->updateTimeout(SYNC_REQUEST_TIMEOUT);
+
+    // increment before the notify so that the ack equals the value we are expecting
+    const uint32_t oldLo = m_sync.value.lo;
+    m_sync.value.lo++;
+    if (oldLo > m_sync.value.lo)
+        m_sync.value.hi++;
+
+    // must go out before the ClientMessage AND before the ConfigureNotify below
+    setAllowCommits(false);
+
+    xcb_client_message_data_t msg = {};
+    msg.data32[0]                 = HYPRATOMS["_NET_WM_SYNC_REQUEST"];
+    msg.data32[1]                 = Time::millis(Time::steadyNow());
+    msg.data32[2]                 = m_sync.value.lo;
+    msg.data32[3]                 = sc<uint32_t>(m_sync.value.hi);
+
+    g_pXWayland->m_wm->sendWMMessage(m_self.lock(), &msg, XCB_EVENT_MASK_NO_EVENT);
+
+    m_sync.pending = true;
+}
+
+void CXWaylandSurface::ackSync() {
+    // a sync request can be ack'ed after the timeout. If that happens, just re-enable
+    // XSync back and do nothing more.
+    m_sync.pending = false;
+    if (!m_sync.enabled) {
+        m_sync.enabled = true;
+        return;
+    }
+
+    m_sync.acked = true;
+    // the timer stays armed until the new buffer commits (finishSync stops it)
+    setAllowCommits(true);
+}
+
+void CXWaylandSurface::ackSyncTimeout() {
+    // If a sync request times out, disable XSync temporarily until the client comes back to its senses.
+    m_sync.enabled = false;
+    m_sync.pending = false;
+    m_sync.acked   = false;
+    setAllowCommits(true);
+    finishSync(); // stops the timer and emits syncFinished
+}
+
+void CXWaylandSurface::finishSync() {
+    if (m_sync.timeout)
+        m_sync.timeout->updateTimeout(std::nullopt);
+
+    m_sync.acked = false;
+    m_events.syncFinished.emit();
+}
+
+void CXWaylandSurface::destroySync() {
+    const bool HOLDING = m_sync.pending || m_sync.acked;
+    const bool CANX    = g_pXWayland && g_pXWayland->m_wm;
+
+    if (m_sync.timeout) {
+        m_sync.timeout->cancel();
+        m_sync.timeout.reset();
+    }
+
+    // only write when we actually blocked commits, avoids noise on plain teardown
+    if (m_sync.pending && CANX)
+        setAllowCommits(true);
+
+    if (m_sync.alarm != XCB_NONE) {
+        if (CANX) {
+            xcb_sync_destroy_alarm(g_pXWayland->m_wm->getConnection(), m_sync.alarm);
+            xcb_flush(g_pXWayland->m_wm->getConnection());
+        }
+        m_sync.alarm = XCB_NONE;
+    }
+
+    m_sync.counter = XCB_NONE;
+    m_sync.value   = {0, 0};
+    m_sync.enabled = false;
+    m_sync.pending = false;
+    m_sync.acked   = false;
+
+    if (HOLDING)
+        m_events.syncFinished.emit();
+}
+
+void CXWaylandSurface::setAllowCommits(bool allow) {
+    if (!m_allowCommitsSupported)
+        return;
+
+    uint32_t value = allow;
+    xcb_change_property(g_pXWayland->m_wm->getConnection(), XCB_PROP_MODE_REPLACE, m_xID, HYPRATOMS["_XWAYLAND_ALLOW_COMMITS"], XCB_ATOM_CARDINAL, 32, 1, &value);
+    // fail-open and teardown run outside CXWM::onEvent (timer callback / destructor), so the
+    // queued write must be flushed here or XWayland keeps commits blocked.
     xcb_flush(g_pXWayland->m_wm->getConnection());
 }
 
@@ -314,6 +533,10 @@ CXWaylandSurface::CXWaylandSurface(uint32_t xID_, CBox geometry_, bool OR) : m_x
     ;
 }
 
+CXWaylandSurface::~CXWaylandSurface() {
+    ;
+}
+
 void CXWaylandSurface::ensureListeners() {
     ;
 }
@@ -328,6 +551,38 @@ void CXWaylandSurface::unmap() {
 
 bool CXWaylandSurface::wantsFocus() {
     return false;
+}
+
+bool CXWaylandSurface::waitingForSync() const {
+    return false;
+}
+
+void CXWaylandSurface::updateSyncSupport() {
+    ;
+}
+
+void CXWaylandSurface::sendSyncRequest() {
+    ;
+}
+
+void CXWaylandSurface::ackSync() {
+    ;
+}
+
+void CXWaylandSurface::ackSyncTimeout() {
+    ;
+}
+
+void CXWaylandSurface::finishSync() {
+    ;
+}
+
+void CXWaylandSurface::destroySync() {
+    ;
+}
+
+void CXWaylandSurface::setAllowCommits(bool allow) {
+    ;
 }
 
 void CXWaylandSurface::configure(const CBox& box) {

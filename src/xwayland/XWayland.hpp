@@ -80,6 +80,8 @@ inline std::unordered_map<std::string, uint32_t> HYPRATOMS = {
     HYPRATOM("_NET_WM_ICON"),
     HYPRATOM("_NET_WM_CM_S0"),
     HYPRATOM("_NET_WM_PING"),
+    HYPRATOM("_NET_WM_SYNC_REQUEST"),
+    HYPRATOM("_NET_WM_SYNC_REQUEST_COUNTER"),
     HYPRATOM("WM_PROTOCOLS"),
     HYPRATOM("WM_HINTS"),
     HYPRATOM("WM_DELETE_WINDOW"),
@@ -127,5 +129,6 @@ inline std::unordered_map<std::string, uint32_t> HYPRATOMS = {
     HYPRATOM("DELETE"),
     HYPRATOM("TEXT"),
     HYPRATOM("INCR"),
+    HYPRATOM("_XWAYLAND_ALLOW_COMMITS"),
 #endif
 };
