@@ -9,6 +9,7 @@
 #include <xcb/res.h>
 #include <xcb/xfixes.h>
 #include <xcb/composite.h>
+#include <xcb/sync.h>
 #include <xcb/xcb_errors.h>
 #include <hyprutils/os/FileDescriptor.hpp>
 #include <cinttypes> // for PRIxPTR
@@ -162,6 +163,7 @@ class CXWM {
     void         handleClientMessage(xcb_client_message_event_t* e);
     void         handleFocusIn(xcb_focus_in_event_t* e);
     void         handleFocusOut(xcb_focus_out_event_t* e);
+    void         handleSyncAlarm(xcb_sync_alarm_notify_event_t* e);
     void         handleError(xcb_value_error_t* e);
 
     void         removeTransfersForWindow(xcb_window_t window);
@@ -191,9 +193,11 @@ class CXWM {
 
     wl_event_source*                          m_eventSource = nullptr;
 
-    const xcb_query_extension_reply_t*        m_xfixes      = nullptr;
-    const xcb_query_extension_reply_t*        m_xres        = nullptr;
-    int                                       m_xfixesMajor = 0;
+    const xcb_query_extension_reply_t*        m_xfixes        = nullptr;
+    const xcb_query_extension_reply_t*        m_xres          = nullptr;
+    const xcb_query_extension_reply_t*        m_sync          = nullptr;
+    int                                       m_xfixesMajor   = 0;
+    int                                       m_syncEventBase = 0;
 
     xcb_visualid_t                            m_visualID;
     xcb_colormap_t                            m_colormap;
