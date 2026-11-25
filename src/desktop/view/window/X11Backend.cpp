@@ -303,7 +303,7 @@ SBackendTraits CX11Backend::traits() const {
 }
 
 double CX11Backend::surfaceScale() const {
-    static auto PXWLFORCESCALEZERO = CConfigValue<Config::INTEGER>("xwayland:force_zero_scaling");
+    static auto PXWLFORCESCALEZERO = CConfigValue<Config::BOOL>("xwayland:force_zero_scaling");
 
     const auto  MONITOR = preferredMonitor(nullptr);
     return *PXWLFORCESCALEZERO && MONITOR ? MONITOR->m_scale : 1.0;
@@ -314,7 +314,7 @@ Vector2D CX11Backend::reportedSize() const {
 }
 
 CBox CX11Backend::clientToLogical(const CBox& box, PHLMONITOR preferredMonitor_) const {
-    static auto PXWLFORCESCALEZERO = CConfigValue<Config::INTEGER>("xwayland:force_zero_scaling");
+    static auto PXWLFORCESCALEZERO = CConfigValue<Config::BOOL>("xwayland:force_zero_scaling");
 
     const auto  MONITOR = preferredMonitor(preferredMonitor_);
     const auto  SCALE   = *PXWLFORCESCALEZERO && MONITOR ? MONITOR->m_scale : 1.0;
@@ -322,7 +322,7 @@ CBox CX11Backend::clientToLogical(const CBox& box, PHLMONITOR preferredMonitor_)
 }
 
 CBox CX11Backend::logicalToClient(const CBox& box, PHLMONITOR preferredMonitor_) const {
-    static auto PXWLFORCESCALEZERO = CConfigValue<Config::INTEGER>("xwayland:force_zero_scaling");
+    static auto PXWLFORCESCALEZERO = CConfigValue<Config::BOOL>("xwayland:force_zero_scaling");
 
     const auto  MONITOR = preferredMonitor(preferredMonitor_);
     const auto  SCALE   = *PXWLFORCESCALEZERO && MONITOR ? MONITOR->m_scale : 1.0;
