@@ -111,6 +111,8 @@ class CXWaylandSurface {
 
     bool                              wantsFocus();
     bool                              waitingForSync() const;
+    bool                              supportsSync() const;
+    void                              setAllowCommits(bool allow);
     void                              configure(const CBox& box);
     void                              activate(bool activate);
     void                              setFullscreen(bool fs);
@@ -148,7 +150,6 @@ class CXWaylandSurface {
     void         ackSyncTimeout();
     void         finishSync();
     void         destroySync();
-    void         setAllowCommits(bool allow);
 
     SSyncRequest m_sync;
     bool         m_allowCommitsSupported = true;
