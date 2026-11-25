@@ -383,8 +383,16 @@ void CX11Backend::setMaximized(bool maximized) {
     SURFACE->setFullscreen(SURFACE->m_fullscreen);
 }
 
-void CX11Backend::setResizing(bool) {
-    ;
+void CX11Backend::setResizing(bool resizing) {
+    const auto SURFACE = m_xwaylandSurface.lock();
+    if (!SURFACE || SURFACE->supportsSync())
+        return; // sync-capable clients already gate their own commits
+
+    // Non-sync Xwayland clients (e.g. Wine/WebView2) repaint asynchronously and commit
+    // partially-drawn (often white) buffers faster than they can finish during a resize.
+    // Gate their commits so the compositor keeps displaying the last complete buffer until
+    // the drag finishes, avoiding the mid-resize flash.
+    SURFACE->setAllowCommits(!resizing);
 }
 
 bool CX11Backend::setSuspended(bool) {

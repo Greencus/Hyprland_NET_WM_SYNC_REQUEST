@@ -270,6 +270,10 @@ bool CXWaylandSurface::waitingForSync() const {
     return m_sync.enabled && (m_sync.pending || m_sync.acked);
 }
 
+bool CXWaylandSurface::supportsSync() const {
+    return m_sync.enabled;
+}
+
 void CXWaylandSurface::updateSyncSupport() {
     if (m_overrideRedirect)
         return;
@@ -554,6 +558,10 @@ bool CXWaylandSurface::wantsFocus() {
 }
 
 bool CXWaylandSurface::waitingForSync() const {
+    return false;
+}
+
+bool CXWaylandSurface::supportsSync() const {
     return false;
 }
 

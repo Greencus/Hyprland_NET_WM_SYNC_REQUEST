@@ -255,6 +255,14 @@ bool CDragStateController::dragEnd() {
     if (!draggingTarget)
         return false;
 
+    // Make sure Xwayland commit gating is lifted even when we bail out via an early return below,
+    // otherwise a non-sync client could be left with commits blocked indefinitely.
+    const bool                    WASRESIZING = isResizeMode(m_dragMode);
+    Hyprutils::Utils::CScopeGuard restoreClientResizing([draggingTarget, WASRESIZING] {
+        if (WASRESIZING)
+            setClientResizingState(draggingTarget, false);
+    });
+
     // Consume the last motion's deferred warp before drop handling can replace its geometry.
     if (const auto WINDOW = draggingTarget->window(); validMapped(WINDOW)) {
         if (const auto GROUP = WINDOW->grouping().group()) {
@@ -341,8 +349,6 @@ bool CDragStateController::dragEnd() {
     Desktop::focusState()->fullWindowFocus(draggingTarget->window(), Desktop::FOCUS_REASON_DESKTOP_STATE_CHANGE);
 
     m_wasDraggingWindow = false;
-    if (isResizeMode(m_dragMode))
-        setClientResizingState(draggingTarget, false);
 
     m_dragMode            = MBIND_INVALID;
     m_exclusiveDeviceGrab = false;
