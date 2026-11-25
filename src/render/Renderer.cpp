@@ -681,7 +681,7 @@ void IHyprRenderer::renderWindow(CRenderContext& ctx, PHLWINDOW pWindow, PHLMONI
     renderdata.fadeAlpha = presentation.fadeAlpha;
     renderdata.alpha     = presentation.alpha;
     renderdata.decorate  = decorate && !pWindow->backend().traits().suggestsNoBorder && !Fullscreen::controller()->isPresentedFullscreen(pWindow, Fullscreen::FSMODE_FULLSCREEN);
-    renderdata.rounding  = standalone || renderdata.dontRound ? 0 : pWindow->presentation().rounding() * pMonitor->m_scale;
+    renderdata.rounding  = standalone || renderdata.dontRound ? Math::SCornerRadii{} : pWindow->presentation().rounding() * pMonitor->m_scale;
     renderdata.roundingPower = standalone || renderdata.dontRound ? 2.0f : pWindow->presentation().roundingPower();
     renderdata.blur          = !standalone && !ctx.m_renderingSnapshot && pWindow->shouldBlur(presentation);
     renderdata.pWindow       = pWindow;
@@ -767,7 +767,7 @@ void IHyprRenderer::renderWindow(CRenderContext& ctx, PHLWINDOW pWindow, PHLMONI
             CRectPassElement::SRectData data;
             data.color                 = CHyprColor(0, 0, 0, 0);
             data.box                   = wb;
-            data.round                 = renderdata.dontRound ? 0 : renderdata.rounding - 1;
+            data.round                 = renderdata.dontRound ? Math::SCornerRadii{} : renderdata.rounding.inset(1.F);
             data.blur                  = true;
             data.blurA                 = renderdata.fadeAlpha;
             data.xray                  = shouldUseNewBlurOptimizations(ctx, nullptr, pWindow);
@@ -831,7 +831,7 @@ void IHyprRenderer::renderWindow(CRenderContext& ctx, PHLWINDOW pWindow, PHLMONI
                                .blur                  = windowBlur,
                                .blurUsesLive          = windowBlurUsesLive,
                                .blurA                 = renderdata.fadeAlpha,
-                               .blurRound             = renderdata.dontRound ? 0 : std::max(renderdata.rounding - 1, 0),
+                               .blurRound             = renderdata.dontRound ? Math::SCornerRadii{} : renderdata.rounding.inset(1.F),
                                .blurRoundingPower     = renderdata.roundingPower,
                                .transformedBox        = transformedBox,
                                .motionBlur            = windowMotionBlur,
@@ -2657,7 +2657,7 @@ void IHyprRenderer::handleFullscreenSettings(PHLMONITOR pMonitor) {
         // HDR PQ surface & DS is active - surface settings
 
         bool       hdrIsHandled = false;
-        const auto ROOT_SURF    = FULLSCREEN_WINDOW->wlSurface()->resource();
+        const auto ROOT_SURF    = FULLSCREEN_WINDOW ? FULLSCREEN_WINDOW->wlSurface()->resource() : nullptr;
         const auto SURF         = ROOT_SURF ? ROOT_SURF->findWithCM() : nullptr;
         const bool SURF_HAS_CM  = SURF && SURF->m_colorManagement.valid() && SURF->m_colorManagement->hasImageDescription();
         // we can't DS scRGB
